@@ -1,0 +1,38 @@
+{
+  "business": {
+    "id": 1,
+    "name": "Example Bakery",
+    "industry": "Food & Beverage",
+    "location": "Jaipur",
+    "revenue": 500000,
+    "expenses": 350000,
+    "profit": 150000,
+    "cash": 800000,
+    "assets": 1200000
+  },
+  "employees": [
+    {
+      "id": 1,
+      "business_id": 1,
+      "name": "Rahul",
+      "role": "Manager",
+      "salary": 35000
+    },
+    {
+      "id": 2,
+      "business_id": 1,
+      "name": "Priya",
+      "role": "Head Baker",
+      "salary": 28000
+    }
+  ],
+  "ventures": [
+    {
+      "id": 1,
+      "business_id": 1,
+      "objective": "Open a second bakery location",
+      "budget": 600000,
+      "status": "proposed"
+    }
+  ]
+}
