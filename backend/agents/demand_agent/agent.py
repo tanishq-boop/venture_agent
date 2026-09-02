@@ -13,8 +13,8 @@ except ImportError:
     from schemas import DemandFactor, DemandPlan, LocationReport
 
 from strands import Agent
-from strands.models import BedrockModel
 from tools import cached_web_search
+from tracked_bedrock import TrackedBedrockModel
 
 
 # ============================================================
@@ -46,24 +46,24 @@ baseline_demand_factors = [
 
 
 # ============================================================
-# 2. BEDROCK MODEL CONFIGURATION
+# 2. EXECUTION PIPELINE (AGENTS MOVED INSIDE TO GET VENTURE NAME)
 # ============================================================
 
-bedrock_model = BedrockModel(
-    model_id="amazon.nova-2-lite-v1:0",
-    region_name=os.getenv("AWS_REGION", "us-east-1"),
-    temperature=0.1,
-)
+def evaluate_location_demand(venture_description: str, location: str) -> LocationReport:
+    """Evaluates location viability starting from baseline factors."""
+    
+    # Initialize tracked models with the specific venture_description
+    planner_model = TrackedBedrockModel(
+        agent_name="demand_planner_agent",
+        venture_name=venture_description, 
+        model_id="amazon.nova-2-lite-v1:0",
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        temperature=0.1,
+    )
 
-
-# ============================================================
-# 3. WORKFLOW AGENTS
-# ============================================================
-
-# Step 1: Review baseline, prune irrelevant, discover new, write queries
-demand_planner_agent = Agent(
-    model=bedrock_model,
-    system_prompt="""
+    demand_planner_agent = Agent(
+        model=planner_model,
+        system_prompt="""
 You are a US Commercial Location & Demand Strategist.
 Your goal is to prepare a targeted location research plan:
 
@@ -72,29 +72,29 @@ Your goal is to prepare a targeted location research plan:
    - Remove any baseline factor that is non-essential (e.g., foot traffic for a ghost kitchen or B2B shop).
 2. Discover and add venture-specific demand factors ONLY if they materially affect feasibility (e.g., nightlife density for a late-night dessert bar, school density for a daycare).
 3. Generate 2 to 3 targeted, location-specific search queries (referencing the US city/neighborhood) to fetch US Census demographic metrics, competitor maps, or local retail foot traffic.
-""",
-)
+"""
+    )
 
-# Step 2: Synthesize research findings into a final viability verdict
-demand_analyst_agent = Agent(
-    model=bedrock_model,
-    system_prompt="""
+    analyst_model = TrackedBedrockModel(
+        agent_name="demand_analyst_agent",
+        venture_name=venture_description, 
+        model_id="amazon.nova-2-lite-v1:0",
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+        temperature=0.1,
+    )
+
+    demand_analyst_agent = Agent(
+        model=analyst_model,
+        system_prompt="""
 You are a Commercial Real Estate & Market Demand Analyst.
 Review the retrieved market data against the approved demand factors:
 1. Assess demographic fit (median income vs expected pricing).
 2. Assess competition: determine whether existing players signal market health or saturation.
 3. Score viability from 0 to 100 and deliver a definitive verdict ('prime_location', 'viable', 'high_risk', 'unfavorable').
 4. List concrete local advantages and key risks.
-""",
-)
+"""
+    )
 
-
-# ============================================================
-# 4. EXECUTION PIPELINE
-# ============================================================
-
-def evaluate_location_demand(venture_description: str, location: str) -> LocationReport:
-    """Evaluates location viability starting from baseline factors."""
 
     # 1. Refine factors & generate queries in one pass
     plan_prompt = f"""

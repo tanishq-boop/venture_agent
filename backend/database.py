@@ -1,8 +1,5 @@
 """
 Minimal SQLite data layer for the Venture Agent prototype.
-
-No ORM, no migrations — plain sqlite3 with a handful of functions.
-The DB is initialized (schema + seed data) automatically on startup.
 """
 
 import json
@@ -20,7 +17,6 @@ def get_connection():
 
 
 def init_db():
-    """Create tables if they don't exist, and seed data on first run."""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -63,11 +59,24 @@ def init_db():
             content TEXT NOT NULL,
             FOREIGN KEY (business_id) REFERENCES business(id)
         );
+
+        CREATE TABLE IF NOT EXISTS llm_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            venture_name TEXT,
+            agent_name TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            messages TEXT,
+            system_prompt TEXT,
+            response_events TEXT,
+            latency_ms REAL,
+            status TEXT,
+            error TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     conn.commit()
 
-    # Seed only if empty, so re-runs don't duplicate data.
     cur.execute("SELECT COUNT(*) AS c FROM business")
     if cur.fetchone()["c"] == 0 and SEED_PATH.exists():
         with open(SEED_PATH, "r") as f:
@@ -97,14 +106,11 @@ def init_db():
                    VALUES (?, ?, ?, ?, ?)""",
                 (v.get("id"), v["business_id"], v["objective"], v["budget"], v.get("status", "proposed")),
             )
-
         conn.commit()
-
     conn.close()
 
 
 # --- Business ---
-
 def get_business(business_id: int):
     conn = get_connection()
     row = conn.execute("SELECT * FROM business WHERE id = ?", (business_id,)).fetchone()
@@ -130,7 +136,6 @@ def create_business(business: dict):
 
 
 # --- Venture ---
-
 def get_venture(venture_id: int):
     conn = get_connection()
     row = conn.execute("SELECT * FROM venture WHERE id = ?", (venture_id,)).fetchone()
@@ -169,7 +174,6 @@ def update_venture_recommendation(venture_id: int, recommendation: str):
 
 
 # --- Employees / Finance ---
-
 def get_employees(business_id: int):
     conn = get_connection()
     rows = conn.execute("SELECT * FROM employee WHERE business_id = ?", (business_id,)).fetchall()
@@ -178,7 +182,6 @@ def get_employees(business_id: int):
 
 
 def get_finance(business_id: int):
-    """Finance is derived from the business record for this prototype."""
     business = get_business(business_id)
     if not business:
         return None
@@ -193,7 +196,6 @@ def get_finance(business_id: int):
 
 
 # --- Memory ---
-
 def save_memory(business_id: int, content: str):
     conn = get_connection()
     cur = conn.execute(
@@ -211,3 +213,30 @@ def get_memories(business_id: int):
     rows = conn.execute("SELECT * FROM memory WHERE business_id = ?", (business_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# --- LLM Tracking ---
+def log_llm_call(venture_name, agent_name, model_id, messages, system_prompt, response_events, latency_ms, status, error=None):
+    """Inserts a recorded LLM call into the database with the venture name."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO llm_logs 
+           (venture_name, agent_name, model_id, messages, system_prompt, response_events, latency_ms, status, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            venture_name,
+            agent_name,
+            model_id,
+            json.dumps(messages, default=str),
+            system_prompt,
+            json.dumps(response_events, default=str),
+            latency_ms,
+            status,
+            error
+        )
+    )
+    conn.commit()
+    conn.close()
+
+
+    
