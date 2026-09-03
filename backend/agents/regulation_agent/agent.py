@@ -1,192 +1,227 @@
 import json
-import os
-import sys
-from pathlib import Path
-
-BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.append(str(BACKEND_DIR))
-s
-try:
-    from .schemas import RegulationItem, RegulationPlan, RegulationReport
-except ImportError:
-    from schemas import RegulationItem, RegulationPlan, RegulationReport
 
 from strands import Agent
-from strands.models import BedrockModel
-from tools import cached_web_search
 
+from backend.agent_wrapper import TrackedBedrockModel
+from backend.agents.regulations_agent.schemas import (
+    RegulationItem,
+    RegulationPlan,
+    FinalRegulationFindings,
+)
+from strands.tools import web_search
 
-# ============================================================
-# 1. STARTER REGULATORY BASELINES (US LOCAL & STATE)
-# ============================================================
-
-baseline_regulations = [
+regulations = [
     RegulationItem(
-        name="certificate_of_occupancy_and_zoning",
-        governing_body="City Building & Development Services",
-        strictness="very_strict",
-        punishment_for_violation="Immediate stop-work order or red-tag padlocking; prohibited from opening to the public.",
-        maintenance_difficulty="low",
-        ongoing_obligations=[
-            "Maintain approved floor plan and occupancy limits",
-            "Annual fire marshal life-safety inspection"
-        ],
-        estimated_fees="$200 - $800 one-time"
+        name="business_registration",
+        level="state",
+        reason="Registering the business entity is generally required to legally operate.",
     ),
     RegulationItem(
-        name="local_health_department_operating_permit",
-        governing_body="City / County Public Health Department",
-        strictness="very_strict",
-        punishment_for_violation="Mandatory closure notices, public health grade downgrade, and daily escalating fines.",
-        maintenance_difficulty="high",
-        ongoing_obligations=[
-            "Twice-daily refrigeration and hot-holding temperature logs",
-            "Mandatory Certified Food Protection Manager on shift",
-            "Unannounced random inspections"
-        ],
-        estimated_fees="$250 - $600/year renewal"
+        name="ein_tax_registration",
+        level="federal",
+        reason="A federal tax ID is typically required for hiring, banking, and tax filing.",
     ),
     RegulationItem(
-        name="state_sales_tax_and_business_registration",
-        governing_body="State Department of Revenue / Secretary of State",
-        strictness="very_strict",
-        punishment_for_violation="Tax liens, freeze on business bank accounts, and revocation of authority to transact business.",
-        maintenance_difficulty="moderate",
-        ongoing_obligations=[
-            "Monthly or quarterly state sales tax remittance",
-            "Annual franchise tax reporting"
-        ],
-        estimated_fees="$50 - $300 one-time state filing"
+        name="general_business_license",
+        level="local",
+        reason="Most local jurisdictions require a general license to operate a business.",
     ),
     RegulationItem(
-        name="workplace_safety_and_labor_standards",
-        governing_body="OSHA & State Workforce Commission",
-        strictness="moderate",
-        punishment_for_violation="OSHA citations starting at several thousand dollars per violation, back-wage claims, and workers' compensation penalties.",
-        maintenance_difficulty="moderate",
-        ongoing_obligations=[
-            "Mandatory statutory labor law poster displays",
-            "Workers' Compensation insurance coverage",
-            "Safety Data Sheets (SDS) for all commercial cleaning chemicals"
-        ],
-        estimated_fees="Included in recurring workers' comp insurance premiums"
+        name="zoning_land_use_permit",
+        level="local",
+        reason="Confirms the premises/location is zoned for this type of business activity.",
+    ),
+    RegulationItem(
+        name="industry_specific_license",
+        level="state",
+        reason="Certain industries require state-specific licenses, permits, or certifications to operate legally.",
     ),
 ]
 
 
 # ============================================================
-# 2. BEDROCK MODEL CONFIGURATION
+# 3. BEDROCK MODEL (UNCHANGED)
 # ============================================================
 
-bedrock_model = BedrockModel(
+model = TrackedBedrockModel(
     model_id="amazon.nova-2-lite-v1:0",
-    region_name=os.getenv("AWS_REGION", "us-east-1"),
+    region_name="us-east-1",
     temperature=0.1,
 )
 
 
 # ============================================================
-# 3. WORKFLOW AGENTS
+# 4. WORKFLOW AGENTS
 # ============================================================
 
-# Step 1: Review baseline, drop non-applicable, discover specific rules, write queries
-regulation_planner_agent = Agent(
-    model=bedrock_model,
+# Step A: Add relevant missing regulations to the baseline
+discovery_agent = Agent(
+    model=model,
     system_prompt="""
-You are a US Regulatory Compliance & Municipal Licensing Specialist.
-Analyze the business venture and target city/state:
-
-1. Review the starter baseline regulations:
-   - Keep baselines that strictly apply.
-   - Remove baselines that do not apply (e.g., remove food health permits for software or dry retail).
-2. Discover and add venture-specific rules (e.g., grease trap wastewater permits for bakeries/restaurants, liquor licensing, FDA facility registrations for wholesale packaged goods).
-3. Formulate 2 to 3 targeted search queries targeting official municipal (austintexas.gov, county health) or state regulatory requirements, penalties, and renewal fee schedules.
+You analyze a business venture and expand the initial list of regulations.
+Start with the provided baseline regulation items and add all other permits,
+licenses, certificates, or registrations that might be relevant, required,
+or standard for this specific venture, at the federal, state, and local level.
+Do not filter or remove any items in this step.
 """,
 )
 
-# Step 2: Synthesize findings into structured severity, punishment, and maintenance metrics
-regulation_analyst_agent = Agent(
-    model=bedrock_model,
+# Step B: Filter out non-essential/irrelevant regulations
+filtering_agent = Agent(
+    model=model,
     system_prompt="""
-You are a Commercial Regulatory Legal Analyst.
-Evaluate the gathered legal and municipal findings against the approved regulations:
-1. Specify explicit punishments for non-compliance (fines, court citations, forced closure).
-2. Rate the ongoing maintenance difficulty (high/moderate/low) based on the operational friction of logs, recurrent audits, and certifications.
-3. Categorize the overall burden: 'heavy' (heavily regulated like food, alcohol, childcare), 'moderate', or 'light'.
-4. Identify showstopper penalties and provide a chronological pre-opening checklist.
+You refine a regulation list for a business venture.
+Review the candidate regulation items:
+- Remove items that are clearly unnecessary, trivial, or duplicate for this venture.
+- Adjust level (federal, state, local) if needed.
+Return only the cleaned, finalized regulation plan.
+""",
+)
+
+# Step C: Research and validate regulations. Handles BOTH a first-time full
+# validation pass and a feedback-driven amendment pass — the behavior is
+# selected by what the prompt gives it (see regulations_agent() below), not
+# by having two separate agents/system-prompts with duplicated citation rules.
+validation_agent = Agent(
+    model=model,
+    tools=[web_search],
+    system_prompt="""
+Research and validate US regulatory requirements for a business venture using web search.
+
+SOURCE POLICY:
+- Official federal, state, county, and municipal government sources are the source of truth;
+  prefer the authority that issues or enforces the requirement.
+- Secondary sources may help discover requirements but cannot be final evidence.
+- If official evidence is unavailable or insufficient, mark the finding "uncertain".
+- Never invent requirements, authorities, fees, penalties, citations, quotes, or applicability.
+
+You will receive either:
+(a) a regulation plan for first-time validation, or
+(b) previous findings plus a problems summary.
+
+For (b):
+- Re-research ONLY items implicated by the feedback.
+- Preserve unaffected items exactly, including reason, evidence, and citations.
+- Add requirements identified as missing.
+- Return the COMPLETE updated findings, including unchanged items.
+
+For (a):
+- Freshly research every item in the regulation plan.
+
+For EVERY finding provide:
+- issuing_authority: responsible government body.
+- requirement_type: license, permit, certificate, registration, or other.
+- status:
+  "confirmed" = directly verified by an official source;
+  "likely_required" = strongly indicated by official sources but exact applicability is unclear;
+  "uncertain" = insufficient, unavailable, or conflicting evidence.
+- reason: why it applies to this venture.
+- evidence: what was found and how it was validated.
+- citations: sources actually retrieved via web search, each with its URL and a short
+  verbatim quote (≤1 sentence) directly supporting the finding.
+
+Retrieve and inspect the underlying source; search-result snippets alone are not sufficient.
+
+If the state, county, or locality is unspecified, do not assume one. Mark the jurisdiction
+as uncertain and explain why.
+
+Clearly distinguish confirmed, likely, and unresolved requirements.
 """,
 )
 
 
 # ============================================================
-# 4. EXECUTION PIPELINE
+# 5. RUN WORKFLOW
 # ============================================================
 
-def evaluate_regulations(venture_description: str, location: str) -> RegulationReport:
-    """Discovers rules, determines punishments and maintenance difficulty, and builds an action checklist."""
 
-    # 1. Plan regulations to investigate & formulate queries
-    plan_prompt = f"""
+def regulations_agent(
+    venture_description: str,
+    problems_summary: str | None = None,
+    previous_findings: FinalRegulationFindings | dict | None = None,
+) -> FinalRegulationFindings:
+
+    has_feedback = bool(problems_summary) and bool(previous_findings)
+
+    # ------------------------------------------------------------
+    # AMEND PATH: reuse previous work, only re-research flagged items
+    # ------------------------------------------------------------
+    if has_feedback:
+
+        if isinstance(previous_findings, FinalRegulationFindings):
+            previous_plan = previous_findings
+        else:
+            previous_plan = FinalRegulationFindings.model_validate(previous_findings)
+
+        prompt_amend = f"""
 VENTURE:
 {venture_description}
 
-TARGET LOCATION:
-{location}
+PROBLEMS SUMMARY (feedback on the previous plan):
+{problems_summary}
 
-STARTER BASELINE REGULATIONS:
-{json.dumps([r.model_dump() for r in baseline_regulations], indent=2)}
+PREVIOUS REGULATION FINDINGS:
+{json.dumps(previous_plan.model_dump(), indent=2)}
 
-Review the baselines, prune irrelevant items, add venture-specific local/state requirements, and generate 2-3 search queries.
+Update only the items implicated by the problems summary. Return the
+complete, updated set of findings including unchanged items.
 """
-    plan: RegulationPlan = regulation_planner_agent(
-        plan_prompt,
+        amended_findings = validation_agent(
+            prompt_amend,
+            structured_output_model=FinalRegulationFindings,
+        ).structured_output
+
+        return amended_findings
+
+    # ------------------------------------------------------------
+    # FULL PATH: first run, no feedback given
+    # ------------------------------------------------------------
+
+    # 1. DISCOVERY STEP
+    prompt_discover = f"""
+    VENTURE:
+    {venture_description}
+
+    Identify all potentially relevant permits, licenses, certificates,
+    registrations, or other regulatory requirements for this venture
+    at the federal, state, and local level.
+
+    Return a comprehensive candidate regulation plan.
+"""
+    expanded_plan = discovery_agent(
+        prompt_discover,
         structured_output_model=RegulationPlan,
     ).structured_output
 
-    # 2. Execute cached web searches
-    search_dossier = [
-        {"query": q, "result": cached_web_search(q)}
-        for q in plan.search_queries
-    ]
-
-    # 3. Analyze strictness, punishment, and operational maintenance
-    analysis_prompt = f"""
+    # 2. FILTERING STEP
+    prompt_filter = f"""
 VENTURE:
 {venture_description}
 
-TARGET LOCATION:
-{location}
+EXPANDED CANDIDATE REGULATIONS:
+{json.dumps([r.model_dump() for r in expanded_plan.regulations], indent=2)}
 
-APPROVED REGULATIONS:
-{json.dumps([r.model_dump() for r in plan.approved_regulations], indent=2)}
-
-RESEARCH DATA:
-{json.dumps(search_dossier, indent=2)}
-
-Generate the complete RegulationReport detailing strictness, penalties, maintenance difficulty, and required steps.
+Filter out unnecessary or redundant items and return the finalized list of essential regulations.
 """
-    report: RegulationReport = regulation_analyst_agent(
-        analysis_prompt,
-        structured_output_model=RegulationReport,
+    filtered_plan = filtering_agent(
+        prompt_filter,
+        structured_output_model=RegulationPlan,
     ).structured_output
 
-    return report
+    # 3. WEB SEARCH & VALIDATION STEP
+    prompt_validate = f"""
+VENTURE:
+{venture_description}
 
+FINAL REGULATION PLAN TO VALIDATE:
+{json.dumps([r.model_dump() for r in filtered_plan.regulations], indent=2)}
 
-if __name__ == "__main__":
-    test_venture = "1,200 sq ft retail bakery producing fresh bread and pastries"
-    test_location = "Austin, Texas"
+Use web search to confirm and validate these specific regulatory items and
+produce final findings.
+"""
+    final_findings = validation_agent(
+        prompt_validate,
+        structured_output_model=FinalRegulationFindings,
+    ).structured_output
 
-    report = evaluate_regulations(test_venture, test_location)
-    print(f"\n--- COMPLIANCE BURDEN: {report.overall_compliance_burden.upper()} ---")
-    print(f"Maintenance Difficulty: {report.maintenance_summary}")
-    print("\nShowstopper Penalties:")
-    for penalty in report.showstopper_penalties:
-        print(f" - {penalty}")
-    print("\nRegulated Items Found:")
-    for reg in report.regulations:
-        print(f" * {reg.name} ({reg.strictness.upper()} strictness | {reg.maintenance_difficulty.upper()} maintenance)")
-        print(f"   Punishment: {reg.punishment_for_violation}")
-        print(f"   Ongoing Tasks: {reg.ongoing_obligations}")
-        print(f"   Fees: {reg.estimated_fees}")
+    return final_findings
