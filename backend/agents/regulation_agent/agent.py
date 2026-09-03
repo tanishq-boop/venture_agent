@@ -45,7 +45,8 @@ regulations = [
 
 model = TrackedBedrockModel(
     model_id="amazon.nova-2-lite-v1:0",
-    region_name="us-east-1",
+    agent_name="Regulation_Agent",
+    region_name=os.getenv("AWS_REGION", "us-east-1"),
     temperature=0.1,
 )
 
@@ -133,7 +134,6 @@ Clearly distinguish confirmed, likely, and unresolved requirements.
 # ============================================================
 # 5. RUN WORKFLOW
 # ============================================================
-
 
 def regulations_agent(
     venture_description: str,

@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Text
 from database import Base
+from sqlalchemy import Column, Integer, String, Text
 
 
 class LLMLog(Base):
@@ -13,8 +13,19 @@ class LLMLog(Base):
 
     messages = Column(Text, nullable=False)
     system_prompt = Column(Text, nullable=True)
-    response_events = Column(Text, nullable=False)
+    reply = Column(Text, nullable=False)
 
     latency_ms = Column(Integer, nullable=True)
     status = Column(String, nullable=False)
     error = Column(Text, nullable=True)
+
+    # Core Token Metrics
+    input_tokens = Column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    output_tokens = Column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    total_tokens = Column(
+        Integer, default=0, server_default="0", nullable=False
+    )
