@@ -1,11 +1,9 @@
-
 import json
 
 from strands import Agent
 
 from backend.agent_wrapper import TrackedBedrockModel
 from backend.agents.finance_agent.schemas import CostItem, CostPlan, FinalCostEstimates
-from strands.models import BedrockModel
 from strands.tools import web_search
 
 
@@ -50,7 +48,7 @@ model = TrackedBedrockModel(
 
 
 # ============================================================
-# 4. WORKFLOW AGENTS (SEPARATED)
+# 4. WORKFLOW AGENTS
 # ============================================================
 
 # Step A: Add relevant missing costs to the baseline
@@ -76,14 +74,46 @@ Return only the cleaned, finalized cost plan.
 """,
 )
 
-# Step C: Use web search to estimate values for the finalized list
+# Step C: Research and estimate costs. Handles BOTH a first-time full
+# estimation pass and a feedback-driven amendment pass — the behavior is
+# selected by what the prompt gives it (see finance_agent() below), not by
+# having two separate agents/system-prompts with duplicated citation rules.
 estimation_agent = Agent(
     model=model,
     tools=[web_search],
     system_prompt="""
-You estimate costs for a business venture.
-Use the web search tool to find realistic current pricing, market standard rates, or average expenses for each item in the provided cost plan.
-Provide concrete estimated amounts (one-time or monthly), currency, explanation, and sources used.
+You research and estimate costs for a business venture using web search.
+
+You will either be given:
+(a) a cost plan to estimate for the first time, or
+(b) a previous full set of cost estimates plus a problems summary describing
+    what is missing, wrong, or unsupported in that previous plan.
+
+If given (b) — a previous set of estimates and a problems summary:
+- Only re-investigate and update items that the problems summary actually
+  implicates. Use web search to find better/updated pricing or evidence for
+  those items only.
+- Leave every other item exactly as it was: copy its reason, evidence, and
+  citations through unchanged. Do not re-research or rewrite items the
+  feedback did not raise concerns about.
+- If the feedback implies a cost category is missing entirely, add it as a
+  new item with its own reason, evidence, and citations.
+- Your output must be the complete, updated cost plan covering all items
+  (unchanged items included), not just the changed ones.
+
+If given (a) — no previous estimates — treat every item in the provided cost
+plan as needing fresh research.
+
+For EVERY cost item you return, you must provide:
+- reason: why this cost applies to this specific venture.
+- evidence: what you found and how you derived the estimated amount(s) from it.
+- citations: a list of sources used for this item. Each citation must include the
+  source URL and a short (one sentence or less) verbatim quote from that source
+  that directly supports the estimate. Do not fabricate quotes or sources —
+  only cite pages you actually retrieved via web search.
+
+Provide concrete estimated amounts (one-time or monthly) and currency alongside
+the reason, evidence, and citations for each item.
 """,
 )
 
@@ -92,7 +122,47 @@ Provide concrete estimated amounts (one-time or monthly), currency, explanation,
 # 5. RUN WORKFLOW
 # ============================================================
 
-def create_cost_plan(venture_description: str) -> FinalCostEstimates:
+def finance_agent(
+    venture_description: str,
+    problems_summary: str | None = None,
+    previous_estimates: FinalCostEstimates | dict | None = None,
+) -> FinalCostEstimates:
+
+    has_feedback = bool(problems_summary) and bool(previous_estimates)
+
+    # ------------------------------------------------------------
+    # AMEND PATH: reuse previous work, only re-research flagged items
+    # ------------------------------------------------------------
+    if has_feedback:
+
+        if isinstance(previous_estimates, FinalCostEstimates):
+            previous_plan = previous_estimates
+        else:
+            previous_plan = FinalCostEstimates.model_validate(previous_estimates)
+
+        prompt_amend = f"""
+VENTURE:
+{venture_description}
+
+PROBLEMS SUMMARY (feedback on the previous plan):
+{problems_summary}
+
+PREVIOUS COST ESTIMATES:
+{json.dumps(previous_plan.model_dump(), indent=2)}
+
+Update only the items implicated by the problems summary. Return the
+complete, updated cost plan including unchanged items.
+"""
+        amended_estimates = estimation_agent(
+            prompt_amend,
+            structured_output_model=FinalCostEstimates,
+        ).structured_output
+
+        return amended_estimates
+
+    # ------------------------------------------------------------
+    # FULL PATH: first run, no feedback given
+    # ------------------------------------------------------------
 
     # 1. ADDITION STEP
     prompt_add = f"""
