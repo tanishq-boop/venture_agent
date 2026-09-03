@@ -1,0 +1,120 @@
+import json
+import os
+import requests
+from pydantic import BaseModel, Field
+from typing import List
+
+# ============================================================
+# 1. SCHEMAS (Only ONE LLM output schema needed now)
+# ============================================================
+
+class RegulationItem(BaseModel):
+    name: str = Field(description="Official name of the permit/license")
+    governing_body: str = Field(description="The specific agency (e.g., Texas Comptroller, Austin Public Health)")
+    punishment_for_violation: str = Field(description="Explicit penalties found in the search text")
+    estimated_fees: str = Field(description="Fee amounts if found, otherwise 'Variable'")
+
+class RegulationReport(BaseModel):
+    regulations: List[RegulationItem]
+    showstopper_penalties: List[str]
+
+# ============================================================
+# 2. DETERMINISTIC API FUNCTIONS (Zero LLM Tokens)
+# ============================================================
+
+def get_naics_keyword(venture_description: str) -> str:
+    """
+    In a production app, you would query the free US Census NAICS API here.
+    For this example, we'll extract a simple keyword based on the input string.
+    """
+    # E.g., https://api.census.gov/data/timeseries/econ/naics?get=NAICS2017_TITLE&NAICS2017=*
+    # We simulate the API extraction here to save tokens.
+    if "bakery" in venture_description.lower():
+        return "Retail Bakery"
+    return "Commercial Business"
+
+def fetch_gov_search_results(keyword: str, state: str, city: str) -> str:
+    """
+    Uses Google Custom Search API (Free Tier) locked to .gov domains.
+    This replaces the token-heavy 'Discovery Agent'.
+    """
+    # Replace with your actual Google API Key and CSE ID
+    # CSE should be configured to only search site:*.gov and site:municode.com
+    API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_API_KEY")
+    CSE_ID = os.getenv("GOOGLE_CSE_ID", "YOUR_CSE_ID")
+    
+    # We formulate highly targeted queries directly in code
+    queries = [
+        f"{keyword} business license requirements state of {state}",
+        f"{keyword} commercial permits health zoning city of {city}"
+    ]
+    
+    aggregated_snippets = []
+    
+    for q in queries:
+        # Simulated API call - in reality: requests.get(f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CSE_ID}&q={q}")
+        print(f"Executing deterministic API search: [{q}] on .gov domains...")
+        
+        # Simulating the JSON response from Google Custom Search
+        if "state" in q:
+            aggregated_snippets.append("Texas Comptroller: Retail bakers must obtain a Texas Sales and Use Tax Permit. No fee to apply. Penalty for operating without permit: 5% penalty on tax due.")
+            aggregated_snippets.append("Texas Department of State Health Services: Food Manufacturer License required for wholesale, but retail-only bakeries fall under local jurisdiction.")
+        else:
+            aggregated_snippets.append("Austin Public Health: Food Enterprise Operating Permit required. Fees range from $279 to $745 based on sq ft. Operating without permit results in immediate closure.")
+            aggregated_snippets.append("Austin Development Services: Certificate of Occupancy required for change of use. Commercial grease trap permit required via Austin Water.")
+            
+    return " ".join(aggregated_snippets)
+
+
+# ============================================================
+# 3. SINGLE-PASS LLM SYNTHESIS
+# ============================================================
+
+def evaluate_regulations_low_token(venture_description: str, city: str, state: str) -> RegulationReport:
+    """The optimized pipeline: 1. API Search -> 2. One LLM call to format."""
+    
+    # Step 1: Zero-token data gathering
+    keyword = get_naics_keyword(venture_description)
+    raw_gov_text = fetch_gov_search_results(keyword, state, city)
+    
+    # Step 2: One single LLM call to extract and format the data
+    # We use a lightweight model to save costs
+    print("--> Sending retrieved .gov text to LLM for final synthesis...")
+    
+    from strands.models import BedrockModel
+    # amazon.nova-micro or anthropic.claude-3-haiku-20240307-v1:0 are the cheapest, fastest models for this.
+    model = BedrockModel(model_id="amazon.nova-lite-v1:0", temperature=0.0) 
+    
+    prompt = f"""
+    You are a legal data extractor. 
+    Read the following text scraped directly from official government websites.
+    
+    VENTURE: {venture_description}
+    LOCATION: {city}, {state}
+    
+    GOVERNMENT SEARCH DATA:
+    {raw_gov_text}
+    
+    TASK:
+    Extract ONLY the regulations explicitly mentioned in the text above. 
+    Do not invent, guess, or add baseline regulations that are not in the text.
+    If a fee or punishment is missing, write "Not specified in data".
+    """
+    
+    # We call the model directly, not using the looping Agent class
+    response = model.generate(
+        prompt=prompt,
+        response_model=RegulationReport
+    )
+    
+    return response.structured_output
+
+if __name__ == "__main__":
+    report = evaluate_regulations_low_token("1,200 sq ft retail bakery", "Austin", "Texas")
+    
+    print("\n--- FINAL COMPLIANCE REPORT ---")
+    for reg in report.regulations:
+        print(f"\n* {reg.name}")
+        print(f"  Agency: {reg.governing_body}")
+        print(f"  Penalty: {reg.punishment_for_violation}")
+        print(f"  Fees: {reg.estimated_fees}")
